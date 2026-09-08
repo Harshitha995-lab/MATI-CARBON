@@ -7,6 +7,7 @@
     "dev": "vercel dev"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
     "twilio": "^5.3.0"
   },
   "devDependencies": {

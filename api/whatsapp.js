@@ -1,6 +1,69 @@
 const twilio = require('twilio');
+const { createClient } = require('@supabase/supabase-js');
 
-module.exports = (req, res) => {
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+const SYSTEM_INSTRUCTION = `You are a helpful assistant for Mati Carbon, a company that works with smallholder farmers using enhanced rock weathering — spreading crushed basalt rock dust on farmland to remove carbon dioxide, correct soil acidity, release nutrients, raise crop yields, and increase farmer incomes. Farmers will message you on WhatsApp with questions in Hindi, English, or Hinglish (a mix of both). Always reply in whatever mix of language the farmer used. Keep answers short, warm, and simple — assume the farmer may have limited formal education. You can explain what rock dust does to soil, why it helps crops, and how carbon removal works in general terms. For the exact quantity of rock dust or any specific change to fertilizer amount for their particular plot, do not invent a number — say that Mati's local field team will confirm the exact quantity for their land based on soil testing. If you don't know something, say so honestly and suggest they ask their local Mati field officer.`;
+
+const FALLBACK_MESSAGE = 'Maaf kijiye, abhi thodi dikkat aa rahi hai. Kripya thodi der baad phir se try karein. (Sorry, we are having a temporary issue — please try again shortly.)';
+
+async function getGeminiReply(farmerMessage) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not set');
+  }
+
+  const response = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: SYSTEM_INSTRUCTION }],
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: farmerMessage }],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    throw new Error('Gemini API returned no text');
+  }
+
+  return text.trim();
+}
+
+async function logConversation(farmerNumber, farmerMessage, botResponse) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error('Supabase environment variables are not set');
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey);
+  const { error } = await supabase.from('conversations').insert({
+    farmer_number: farmerNumber,
+    farmer_message: farmerMessage,
+    bot_response: botResponse,
+  });
+
+  if (error) {
+    throw new Error(`Supabase insert error: ${error.message}`);
+  }
+}
+
+module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.status(405).send('Method Not Allowed');
     return;
@@ -8,8 +71,22 @@ module.exports = (req, res) => {
 
   const { Body, From } = req.body || {};
 
+  let replyText;
+  try {
+    replyText = await getGeminiReply(Body || '');
+  } catch (err) {
+    console.error('Gemini request failed:', err);
+    replyText = FALLBACK_MESSAGE;
+  }
+
+  try {
+    await logConversation(From, Body, replyText);
+  } catch (err) {
+    console.error('Supabase logging failed:', err);
+  }
+
   const twiml = new twilio.twiml.MessagingResponse();
-  twiml.message(`You said: "${Body || ''}" (from ${From || 'unknown'})`);
+  twiml.message(replyText);
 
   res.setHeader('Content-Type', 'text/xml');
   res.status(200).send(twiml.toString());
