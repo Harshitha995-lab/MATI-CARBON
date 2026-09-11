@@ -8,12 +8,13 @@ const SYSTEM_INSTRUCTION = `You are a helpful assistant for Mati Carbon, a compa
 
 const FALLBACK_MESSAGE = 'Maaf kijiye, abhi thodi dikkat aa rahi hai. Kripya thodi der baad phir se try karein. (Sorry, we are having a temporary issue — please try again shortly.)';
 
-async function getGeminiReply(farmerMessage) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set');
-  }
+const RETRY_DELAY_MS = 2000;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callGemini(apiKey, farmerMessage) {
   const response = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -32,7 +33,9 @@ async function getGeminiReply(farmerMessage) {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${errorText}`);
+    const error = new Error(`Gemini API error ${response.status}: ${errorText}`);
+    error.status = response.status;
+    throw error;
   }
 
   const data = await response.json();
@@ -42,6 +45,24 @@ async function getGeminiReply(farmerMessage) {
   }
 
   return text.trim();
+}
+
+async function getGeminiReply(farmerMessage) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not set');
+  }
+
+  try {
+    return await callGemini(apiKey, farmerMessage);
+  } catch (err) {
+    if (err.status === 503) {
+      console.warn('Gemini returned 503 (model overloaded), retrying once after delay');
+      await sleep(RETRY_DELAY_MS);
+      return await callGemini(apiKey, farmerMessage);
+    }
+    throw err;
+  }
 }
 
 async function logConversation(farmerNumber, farmerMessage, botResponse) {
